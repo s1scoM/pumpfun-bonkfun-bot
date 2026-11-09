@@ -280,6 +280,8 @@ def build_trader_settings(
         entry_filters=(cfg.get("filters") or {}).get("entry"),
         entry_mode=str(cfg["trade"].get("entry_mode", "sniper")),
         momentum=(cfg.get("filters") or {}).get("momentum"),
+        copytrade=(cfg.get("filters") or {}).get("copytrade"),
+        xsignal=(cfg.get("filters") or {}).get("xsignal"),
     )
 
 

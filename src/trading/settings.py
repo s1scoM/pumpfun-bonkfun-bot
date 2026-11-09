@@ -14,7 +14,7 @@ DEFAULT_MAX_EXIT_SELL_ATTEMPTS = 3
 ENTRIES = ("new_launch", "migration")
 
 #: How coins are found: the launch listener, or the momentum scanner.
-ENTRY_MODES = ("sniper", "momentum")
+ENTRY_MODES = ("sniper", "momentum", "copytrade", "xsignal")
 
 
 def entry_error(entry: str, *, extreme_fast_mode: bool) -> str | None:
@@ -128,3 +128,6 @@ class TraderSettings:
     # market data for pump.fun coins already moving up (trading.momentum).
     entry_mode: str = "sniper"
     momentum: dict | None = None
+    # filters.copytrade / filters.xsignal (trading.signal_entries).
+    copytrade: dict | None = None
+    xsignal: dict | None = None

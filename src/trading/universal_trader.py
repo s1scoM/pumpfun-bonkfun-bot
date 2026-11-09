@@ -46,6 +46,12 @@ from trading.position_store import PositionStore
 from trading.entry_filters import EntryFilterEngine, load_entry_filter_config
 from trading.risk_guard import RiskGuard, RiskLimits
 from trading.momentum import MomentumScanner, load_momentum_config
+from trading.signal_entries import (
+    CopytradeScanner,
+    XSignalScanner,
+    load_copytrade_config,
+    load_xsignal_config,
+)
 from trading.settings import ENTRY_MODES, TraderSettings, entry_error
 from utils.logger import get_logger
 
@@ -149,8 +155,10 @@ class UniversalTrader:
                 f"trade.entry_mode must be one of {list(ENTRY_MODES)}, "
                 f"not {settings.entry_mode!r}"
             )
-        if settings.entry_mode == "momentum" and settings.entry != "new_launch":
-            raise ValueError("trade.entry_mode: momentum needs trade.entry: new_launch")
+        if settings.entry_mode != "sniper" and settings.entry != "new_launch":
+            raise ValueError(
+                f"trade.entry_mode: {settings.entry_mode} needs trade.entry: new_launch"
+            )
         self.settings = settings
         self.entry_mode = settings.entry_mode
         self.entry = settings.entry
@@ -267,15 +275,21 @@ class UniversalTrader:
             ),
         )
 
-        self.momentum = (
-            MomentumScanner(
-                self.solana_client,
-                load_momentum_config(settings.momentum),
-                self.platform,
+        # Polling entry modes share one interface: wait_for_token, mark_traded.
+        # (Attribute keeps its first name, `momentum`, for every such mode.)
+        self.momentum = None
+        if self.entry_mode == "momentum":
+            self.momentum = MomentumScanner(
+                self.solana_client, load_momentum_config(settings.momentum), self.platform
             )
-            if self.entry_mode == "momentum"
-            else None
-        )
+        elif self.entry_mode == "copytrade":
+            self.momentum = CopytradeScanner(
+                self.solana_client, load_copytrade_config(settings.copytrade), self.platform
+            )
+        elif self.entry_mode == "xsignal":
+            self.momentum = XSignalScanner(
+                self.solana_client, load_xsignal_config(settings.xsignal), self.platform
+            )
 
         self.positions = PositionManager(
             settings,
@@ -397,7 +411,7 @@ class UniversalTrader:
                 )
                 if self.momentum is not None:
                     if self.platform != Platform.PUMP_FUN:
-                        raise ValueError("entry_mode: momentum supports pump_fun only")
+                        raise ValueError(f"entry_mode: {self.entry_mode} supports pump_fun only")
                     token_info = await self.momentum.wait_for_token(
                         intake.token_wait_timeout
                     )
@@ -419,7 +433,7 @@ class UniversalTrader:
                     )
             elif self.momentum is not None:
                 # Continuous momentum mode: one pick at a time, next after exit.
-                logger.info("Running momentum scanner in continuous mode")
+                logger.info(f"Running {self.entry_mode} scanner in continuous mode")
                 while True:
                     token_info = await self.momentum.wait_for_token(
                         intake.token_wait_timeout
