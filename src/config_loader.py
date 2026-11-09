@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from core.keystore import resolve_keystore_path
 from interfaces.core import Platform
 from platforms.launchlab_presets import resolve_platform_configs
-from trading.settings import ENTRIES, entry_error
+from trading.settings import ENTRIES, ENTRY_MODES, entry_error
 
 # Existing validation rules (keeping all existing ones)
 REQUIRED_FIELDS = [
@@ -99,6 +99,7 @@ VALID_VALUES = {
     "cleanup.mode": ["disabled", "on_fail", "after_sell", "post_session"],
     "trade.exit_strategy": ["time_based", "tp_sl", "manual"],
     "trade.entry": list(ENTRIES),
+    "trade.entry_mode": list(ENTRY_MODES),
     "platform": ["pump_fun", "launchlab", "lets_bonk", "stonk_fun"],
 }
 

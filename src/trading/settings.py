@@ -13,6 +13,9 @@ DEFAULT_MAX_EXIT_SELL_ATTEMPTS = 3
 #: has just migrated, in their new AMM pool.
 ENTRIES = ("new_launch", "migration")
 
+#: How coins are found: the launch listener, or the momentum scanner.
+ENTRY_MODES = ("sniper", "momentum", "copytrade", "xsignal")
+
 
 def entry_error(entry: str, *, extreme_fast_mode: bool) -> str | None:
     """Why `trade.entry` cannot run as configured, or None when it can."""
@@ -110,3 +113,23 @@ class TraderSettings:
     # Where open positions are kept across restarts; None keeps them in memory
     # only. bot_runner sets `positions/<bot name>.json`.
     positions_file: str | None = None
+
+    # When True, log would-be buys and never call send_transaction.
+    dry_run: bool = True
+    # Hard risk kill-switches (see trading.risk_guard).
+    min_sol_reserve: float = 0.02
+    daily_max_spend_sol: float = 0.1
+    max_losing_trades: int = 3
+    fee_rent_buffer_sol: float = 0.003
+    risk_state_file: str | None = None
+    trailing_stop_percentage: float | None = None
+    entry_filters: dict | None = None
+    # "sniper" takes coins as they launch (listener); "momentum" polls public
+    # market data for pump.fun coins already moving up (trading.momentum).
+    entry_mode: str = "sniper"
+    # At start, adopt pump.fun coins in the wallet that no position record covers.
+    adopt_orphans: bool = False
+    momentum: dict | None = None
+    # filters.copytrade / filters.xsignal (trading.signal_entries).
+    copytrade: dict | None = None
+    xsignal: dict | None = None

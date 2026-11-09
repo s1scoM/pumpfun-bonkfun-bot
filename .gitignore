@@ -177,5 +177,11 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 trades/trades.log
+# Phantom executor request state. Public addresses only, still not source.
+phantom-requests/
 # Mac OS X
 .DS_Store
+# Local Momo dry-run artifacts (never commit secrets)
+bots/momo-*.yaml
+.env.momo
+momo-bot.enc

@@ -1,0 +1,58 @@
+# Config for trade.entry_mode "copytrade" and "xsignal" (src/trading/signal_entries.py).
+# Paste these blocks under `filters:` in your bot YAML (same indent as `momentum:`),
+# then set `trade.entry_mode` to "copytrade" or "xsignal".
+#
+# xsignal queue line format (one JSON object per line, appended by whoever reads X):
+#   {"ts": 1794250000, "mint": "<pump.fun mint>", "symbol": "ABC",
+#    "mentions_now": 42, "mentions_baseline": 6, "window_min": 15,
+#    "source": "x_search", "query": "$ABC OR <mint>"}
+# ts (epoch s or ISO-8601) and mint are required; mention counts are optional but,
+# when given, must show a >= min_spike_ratio spike.
+filters:
+  # entry_mode "copytrade" (src/trading/signal_entries.py): copy pump.fun/PumpSwap
+  # buys of these wallets. Candidates: kolscan.io KOL leaderboard (daily); kept only
+  # wallets seen buying pump.fun with SOL on chain; see /workspace/copytrade-research.
+  copytrade:
+    wss_endpoint: "wss://api.mainnet-beta.solana.com"   # publicnode times out mention subs
+    rpc_endpoint: "https://solana-rpc.publicnode.com"   # getTransaction, off the live bot's RPC
+    max_delay_s: 30              # their buy landed <= 30 s ago
+    max_chase_pct: 15            # skip if price > +15% above their fill
+    min_wallet_buy_sol: 0.2      # ignore their dust/test buys
+    min_curve_real_sol: 0
+    min_wallets: 1
+    detect: "poll"               # getSignaturesForAddress per wallet (ws drops on public nodes)
+    poll_seconds: 3
+    traded_file: "positions/copytrade-traded.json"
+    # Exit side: sell when the copied wallet sells (SourceSellWatcher, same publicnode
+    # rpc_endpoint). Needs the source wallet saved with the position (done at entry).
+    exit_on_source_sell: true    # any sale of that mint by them, partial or full -> sell all, reason copy_exit
+    disable_take_profit: true    # no fixed TP on such a position (trade.take_profit_percentage ignored)
+    disable_trailing_stop: true  # their sale is the exit; trailing would cut winners they still hold
+    max_hold_time_s: 3600        # backup if we miss their sale (overrides trade.max_hold_time)
+    exit_poll_seconds: 2.5       # source wallet poll
+    exit_sell_attempts: 8        # exit sell tries (overrides trade.max_exit_sell_attempts upward)
+    exit_retry_backoff_s: 1.5    # wait after a failed exit sell, doubling ...
+    exit_retry_backoff_max_s: 10 # ... to this cap
+    # trade.stop_loss_percentage (-50%) stays as the other backup.
+    # Kept: on-chain closed PnL positive in /workspace/copytrade-research verify (Nov 9).
+    wallets:
+      - {address: "FqamE7xrahg7FEWoByrx1o8SeyHt44rpmE6ZQfT7zrve", label: "kolscan:EustazZ"}
+      - {address: "JDd3hy3gQn2V982mi1zqhNqUw1GfV2UL6g76STojCJPN", label: "kolscan:West"}
+      - {address: "Cv5GgkpXvtXcsrMcKCJvx46BpMjiM61mpPU1j8RbbbVL", label: "kolscan:R4"}
+
+  # entry_mode "xsignal" (src/trading/signal_entries.py): reads mints from a JSONL
+  # queue another process fills from X search (X is not reachable from the box).
+  xsignal:
+    queue_file: "/workspace/xsignal-queue.jsonl"
+    state_file: "positions/xsignal-state.json"
+    poll_seconds: 5
+    max_signal_age_s: 600        # ignore signals older than 10 min
+    min_spike_ratio: 3.0         # mentions_now / mentions_baseline (when given)
+    min_mentions_now: 5          # when given
+    min_m5_change_pct: -10       # skip if dumping
+    max_m5_change_pct: 150       # skip blow-offs
+    min_buy_sell_ratio: 1.0
+    min_liquidity_usd: 10000     # PumpSwap
+    min_curve_real_sol: 5        # curve coins
+    max_onchain_premium_pct: 15  # chase guard vs DexScreener price
+    traded_file: "positions/xsignal-traded.json"

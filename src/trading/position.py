@@ -16,6 +16,7 @@ class ExitReason(Enum):
     STOP_LOSS = "stop_loss"
     MAX_HOLD_TIME = "max_hold_time"
     MANUAL = "manual"
+    COPY_EXIT = "copy_exit"
 
 
 @dataclass
@@ -36,6 +37,9 @@ class Position:
     # Exit conditions
     take_profit_price: float | None = None
     stop_loss_price: float | None = None
+    trailing_stop_pct: float | None = None
+    peak_price: float | None = None
+    trailing_stop_price: float | None = None
     max_hold_time: int | None = None  # seconds
 
     # Status
@@ -58,6 +62,7 @@ class Position:
         quantity: float,
         take_profit_percentage: float | None = None,
         stop_loss_percentage: float | None = None,
+        trailing_stop_percentage: float | None = None,
         max_hold_time: int | None = None,
         quantity_raw: int | None = None,
     ) -> "Position":
@@ -93,6 +98,13 @@ class Position:
             entry_time=datetime.utcnow(),
             take_profit_price=take_profit_price,
             stop_loss_price=stop_loss_price,
+            trailing_stop_pct=trailing_stop_percentage,
+            peak_price=entry_price,
+            trailing_stop_price=(
+                entry_price * (1 - trailing_stop_percentage)
+                if trailing_stop_percentage is not None
+                else None
+            ),
             max_hold_time=max_hold_time,
         )
 
@@ -108,8 +120,16 @@ class Position:
         if not self.is_active:
             return False, None
 
+        if self.peak_price is None or current_price > self.peak_price:
+            self.peak_price = current_price
+            if self.trailing_stop_pct is not None:
+                self.trailing_stop_price = current_price * (1 - self.trailing_stop_pct)
+
         if self.take_profit_price and current_price >= self.take_profit_price:
             return True, ExitReason.TAKE_PROFIT
+
+        if self.trailing_stop_price and current_price <= self.trailing_stop_price:
+            return True, ExitReason.STOP_LOSS
 
         if self.stop_loss_price and current_price <= self.stop_loss_price:
             return True, ExitReason.STOP_LOSS

@@ -9,6 +9,7 @@ buy is sent until its sell, and `resume` picks those up again after a restart.
 import asyncio
 import dataclasses
 import struct
+import time
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from enum import Enum
@@ -125,6 +126,14 @@ class PositionManager:
     #: Rebound, never mutated, so the class default serves a manager built
     #: without `__init__` too.
     _closes: frozenset[asyncio.Task] = frozenset()
+    #: filters.copytrade when its exit_on_source_sell is on (entry_mode:
+    #: copytrade): positions with a remembered source wallet are sold when that
+    #: wallet sells. Class defaults, as verifiers build a manager without
+    #: `__init__`.
+    copy_exit = None
+    #: Seconds waited after a failed exit sell, doubling to the cap; 0 = none.
+    _exit_backoff: float = 0.0
+    _exit_backoff_max: float = 0.0
 
     def __init__(  # noqa: PLR0913
         self,
@@ -136,6 +145,7 @@ class PositionManager:
         priority_fee_manager: PriorityFeeManager,
         platform_implementations: PlatformImplementations,
         store: PositionStore | None = None,
+        risk_guard=None,
     ) -> None:
         """Set up the manager; without a `store` nothing is written to disk."""
         self.seller = seller
@@ -150,6 +160,7 @@ class PositionManager:
         self.exit_strategy = settings.exit_strategy.lower()
         self.take_profit_percentage = settings.take_profit_percentage
         self.stop_loss_percentage = settings.stop_loss_percentage
+        self.trailing_stop_percentage = settings.trailing_stop_percentage
         self.max_hold_time = settings.max_hold_time
         # The attempt cap is clamped: below 1 would mean "never try to sell".
         self.price_check_interval, self.max_exit_sell_attempts = (
@@ -158,6 +169,26 @@ class PositionManager:
         )
         self.wait_time_after_buy = settings.wait_time_after_buy
         self.marry_mode = settings.marry_mode
+
+        if getattr(settings, "entry_mode", "sniper") == "copytrade":
+            from trading.signal_entries import load_copytrade_config
+
+            copy_cfg = load_copytrade_config(getattr(settings, "copytrade", None))
+            if copy_cfg.exit_on_source_sell:
+                self.copy_exit = copy_cfg
+                self._exit_backoff = copy_cfg.exit_retry_backoff_s
+                self._exit_backoff_max = copy_cfg.exit_retry_backoff_max_s
+                if copy_cfg.exit_sell_attempts:
+                    self.max_exit_sell_attempts = max(
+                        self.max_exit_sell_attempts, copy_cfg.exit_sell_attempts
+                    )
+                logger.info(
+                    f"Copy exit: sell when the copied wallet sells "
+                    f"(take profit {'off' if copy_cfg.disable_take_profit else 'on'}, "
+                    f"trailing stop {'off' if copy_cfg.disable_trailing_stop else 'on'}, "
+                    f"max hold {copy_cfg.max_hold_time_s or self.max_hold_time}s, "
+                    f"exit sell attempts {self.max_exit_sell_attempts})"
+                )
 
         self.cleanup_mode = settings.cleanup_mode
         self.cleanup_force_close_with_burn = settings.cleanup_force_close_with_burn
@@ -171,6 +202,7 @@ class PositionManager:
         # One task per position still running its exit strategy.
         self._open: set[asyncio.Task] = set()
         self.store = store
+        self.risk_guard = risk_guard
 
     @property
     def monitors(self) -> bool:
@@ -664,6 +696,20 @@ class PositionManager:
                 f"has expired is settled by the wallet's balance"
             )
 
+    def adopt(self, orphan) -> None:
+        """Hold a coin found in the wallet without a record, as if resumed.
+
+        The record is written first, so a restart picks it up like any other.
+        """
+        token_info, buy = orphan.token_info, orphan.buy_result
+        if self.store is not None:
+            self.store.add(token_info, buy, orphan.entry_time, self.wallet.pubkey)
+        logger.warning(
+            f"Adopting {token_info.symbol} ({token_info.mint}): {buy.amount} tokens "
+            f"held without a position record"
+        )
+        self.open(token_info, buy, entry_time=orphan.entry_time)
+
     def stored_mints(self) -> set[str]:
         """Every mint in the store, resumed or not; empty without a store."""
         return set() if self.store is None else self.store.mints()
@@ -930,15 +976,33 @@ class PositionManager:
         entry_price = buy_result.price
         if entry_price is None:
             entry_price = await self._first_price(token_info)
+        take_profit = self.take_profit_percentage
+        trailing = self.trailing_stop_percentage
+        max_hold = self.max_hold_time
+        source = self._copy_source(token_info)
+        if source is not None:
+            cfg = self.copy_exit
+            if cfg.disable_take_profit:
+                take_profit = None
+            if cfg.disable_trailing_stop:
+                trailing = None
+            if cfg.max_hold_time_s:
+                max_hold = cfg.max_hold_time_s
+        elif self.copy_exit is not None:
+            logger.warning(
+                f"{token_info.symbol} has no source wallet saved; it keeps the "
+                f"normal exits (no copy exit)"
+            )
         position = Position.create_from_buy_result(
             mint=token_info.mint,
             symbol=token_info.symbol,
             entry_price=entry_price,
             quantity=buy_result.amount,
             quantity_raw=buy_result.amount_raw,
-            take_profit_percentage=self.take_profit_percentage,
+            take_profit_percentage=take_profit,
             stop_loss_percentage=self.stop_loss_percentage,
-            max_hold_time=self.max_hold_time,
+            trailing_stop_percentage=trailing,
+            max_hold_time=max_hold,
         )
         if entry_time is not None:
             position.entry_time = entry_time
@@ -958,9 +1022,47 @@ class PositionManager:
                 f"Stop loss target: {format_price(position.stop_loss_price)} "
                 f"{quote_label}"
             )
+        if position.trailing_stop_price:
+            logger.info(
+                f"Trailing stop armed: {format_price(position.trailing_stop_price)} "
+                f"{quote_label} ({(self.trailing_stop_percentage or 0)*100:.0f}% trail)"
+            )
 
         # Monitor position until exit condition is met
-        await self._monitor_position_until_exit(token_info, position)
+        watcher = None
+        if source is not None:
+            from trading.signal_entries import SourceSellWatcher
+
+            watcher = SourceSellWatcher(
+                self.copy_exit.rpc_endpoint,
+                source["source_wallet"],
+                str(token_info.mint),
+                since_sig=source.get("source_buy_sig"),
+                since_ts=(position.entry_time.replace(tzinfo=UTC).timestamp()
+                          if entry_time is not None else time.time() - 30),
+                poll_seconds=self.copy_exit.exit_poll_seconds,
+                label=source.get("label") or source["source_wallet"][:8],
+            )
+            logger.info(
+                f"Copy exit armed for {token_info.symbol}: selling when "
+                f"{watcher.label} sells it (stop loss "
+                f"{(self.stop_loss_percentage or 0) * 100:.0f}%, max hold {max_hold}s)"
+            )
+            task = asyncio.create_task(watcher.wait(), name=f"copy-exit-{token_info.mint}")
+        try:
+            await self._monitor_position_until_exit(token_info, position, watcher)
+        finally:
+            if watcher is not None:
+                task.cancel()
+
+    def _copy_source(self, token_info: TokenInfo) -> dict | None:
+        """The followed wallet whose buy was copied, if the copy exit applies."""
+        if self.copy_exit is None:
+            return None
+        data = (token_info.additional_data or {}).get("copytrade")
+        if isinstance(data, dict) and isinstance(data.get("source_wallet"), str):
+            return data
+        return None
 
     async def _handle_time_based_exit(
         self,
@@ -1338,7 +1440,7 @@ class PositionManager:
         return fallback
 
     async def _monitor_position_until_exit(
-        self, token_info: TokenInfo, position: Position
+        self, token_info: TokenInfo, position: Position, copy_watch=None
     ) -> None:
         """Monitor a position until exit conditions are met."""
         logger.info(
@@ -1368,6 +1470,9 @@ class PositionManager:
 
                 # Check if position should be exited
                 should_exit, exit_reason = position.should_exit(current_price)
+                if copy_watch is not None and copy_watch.sold and position.is_active:
+                    # The copied wallet sold: that is the exit, whatever else says.
+                    should_exit, exit_reason = True, ExitReason.COPY_EXIT
 
                 if should_exit and exit_reason:
                     logger.info(
@@ -1401,6 +1506,7 @@ class PositionManager:
                         break
                     # Keep monitoring: the next iteration re-reads the price and
                     # retries the sell with a floor that matches the market.
+                    await self._exit_retry_pause(exit_sell_attempts)
                 else:
                     # Log current status
                     exit_sell_attempts = 0
@@ -1420,7 +1526,23 @@ class PositionManager:
                 # max_hold_time is the one exit condition that needs no price,
                 # and should_exit cannot be asked without one. Ask the time-only
                 # question here so the deadline is enforced with the feed down.
-                if position.should_exit_on_time():
+                if copy_watch is not None and copy_watch.sold and position.is_active:
+                    logger.warning(
+                        f"{token_info.symbol}: the copied wallet sold while the "
+                        f"price is unreadable - exiting against the last known "
+                        f"price {format_price(last_known_price)} {quote_label}"
+                    )
+                    exit_sell_attempts = await self._run_exit_attempt(
+                        token_info,
+                        position,
+                        ExitReason.COPY_EXIT,
+                        last_known_price,
+                        exit_sell_attempts + 1,
+                    )
+                    if exit_sell_attempts is None:
+                        break
+                    await self._exit_retry_pause(exit_sell_attempts)
+                elif position.should_exit_on_time():
                     logger.warning(
                         f"Max hold time reached for {token_info.symbol} while "
                         f"the price is unreadable - exiting against the last "
@@ -1439,6 +1561,13 @@ class PositionManager:
                 await asyncio.sleep(
                     self.price_check_interval
                 )  # Continue monitoring despite errors
+
+    async def _exit_retry_pause(self, attempts: int) -> None:
+        """Wait longer after each failed exit sell (copy exit only; else none)."""
+        if self._exit_backoff and attempts > 0:
+            await asyncio.sleep(
+                min(self._exit_backoff * 2 ** (attempts - 1), self._exit_backoff_max)
+            )
 
     async def _run_exit_attempt(
         self,
@@ -1633,6 +1762,8 @@ class PositionManager:
                 label = "Final PnL" if last else "PnL on the part sold"
                 total = realised.suffix(quote_label) if last else ""
                 logger.info(pnl_text(label, pnl, quote_label) + total)
+                if last and self.risk_guard is not None and pnl.pnl < 0:
+                    self.risk_guard.record_loss()
             elif last:
                 logger.info(
                     f"Final PnL: unknown, this sale could not be priced"

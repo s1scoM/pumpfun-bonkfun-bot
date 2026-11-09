@@ -270,6 +270,19 @@ def build_trader_settings(
         max_rps=cfg.get("node", {}).get("max_rps", 25),
         # Open positions, resumed on the next start
         positions_file=positions_file or positions_file_for(cfg.get("name")),
+        dry_run=bool(cfg.get("dry_run", True)),
+        min_sol_reserve=float((cfg.get("risk") or {}).get("min_sol_reserve", 0.02)),
+        daily_max_spend_sol=float((cfg.get("risk") or {}).get("daily_max_spend_sol", 0.1)),
+        max_losing_trades=int((cfg.get("risk") or {}).get("max_losing_trades", 3)),
+        fee_rent_buffer_sol=float((cfg.get("risk") or {}).get("fee_rent_buffer_sol", 0.003)),
+        risk_state_file=(cfg.get("risk") or {}).get("state_file"),
+        trailing_stop_percentage=cfg["trade"].get("trailing_stop_percentage"),
+        entry_filters=(cfg.get("filters") or {}).get("entry"),
+        entry_mode=str(cfg["trade"].get("entry_mode", "sniper")),
+        adopt_orphans=bool(cfg["trade"].get("adopt_orphans", False)),
+        momentum=(cfg.get("filters") or {}).get("momentum"),
+        copytrade=(cfg.get("filters") or {}).get("copytrade"),
+        xsignal=(cfg.get("filters") or {}).get("xsignal"),
     )
 
 
