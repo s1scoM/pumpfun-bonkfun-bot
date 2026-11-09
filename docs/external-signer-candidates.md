@@ -66,3 +66,29 @@ support a claim that social login creates a new empty address every session.
 A mobile wallet is a different account. Drift is a perpetual venue. A session
 delegation to Drift, Jupiter or Axiom would be a new signature we do not
 create, and it would not answer a Phantom MCP `perps_*` 403.
+
+## Who can send
+
+Three different actions are easy to mix together. They are not the same.
+
+A per-trade approval is the supported spot path. The assistant prepares an
+unsigned request. Phantom `solana_send` with `confirmed` omitted only
+simulates. A later call with `confirmed: true` signs and broadcasts that one
+transaction, and only after the user accepts that preview. Buy and sell are
+separate approvals. A blockhash that has expired cannot reuse the old yes.
+
+An assistant-executed send after a preview is the same second call. It is
+possible only in a session that already has Phantom, and only when the user
+sets `confirmed: true` for that preview. This cloud agent has no Phantom
+session, so it cannot make that call. The approval is not stored and cannot
+be reused for the next transaction.
+
+Unattended automation is not available on the embedded MCP wallet.
+Auto-confirm is documented for the browser extension only, and the docs say
+it throws for an embedded provider. None of the reviewed repositories provide
+a scoped session key, a spending limit, or a revocation call for this wallet.
+Holding a raw key would let a process sign alone. That path is refused.
+Jupiter's own wallet documents auto-approvals for Jupiter Wallet, which is a
+different product from this embedded agent wallet. No Drift session-key page
+was found in Drift's docs search, and Drift is a perpetual venue, so it does
+not change the `perps_*` 403.

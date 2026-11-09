@@ -81,6 +81,7 @@ another shape stays in that verifier. Each verifier still runs on its own.
 | `verify_unsigned_phantom_envelope.py` | a public key and a dead blockhash produce a standard-base64 v0 envelope with an empty signature and `confirmed` false; the live send path still signs with a keypair |
 | `verify_phantom_executor.py` | fixture buy, sell and close are unsigned pump.fun or Token-2022 instructions; NOK cap, reserve, stop, duplicate simulation and sendTransaction are refused; the sniper config is unchanged |
 | `verify_external_signer_candidates.py` | the reviewed sol-trade-sdk, eliza and OpenAlice commits stay out of pyproject, and the Phantom executor config stays stopped |
+| `verify_spot_preview.py` | a fixture spot quote past its expiry is refused; a fresh one builds an unsubmitted buy with a sell deadline, a matching simulation is reconciled, and a late sell is not rebuilt |
 
 Two mainnet simulations, also no funds moved:
 

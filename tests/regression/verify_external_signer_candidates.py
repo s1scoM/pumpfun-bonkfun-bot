@@ -71,7 +71,8 @@ def main() -> None:
         "session-key advice is recorded as unsupported",
         "Auto-confirm exists only for the injected extension" in " ".join(doc.split())
         and "session key" in doc
-        and "223224000" in doc,
+        and "223224000" in doc
+        and "Unattended automation is not available" in doc,
         "unverified wallet advice",
     ):
         problems.append("advice")

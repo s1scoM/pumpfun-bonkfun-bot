@@ -131,6 +131,11 @@ def _as_oslo(moment: datetime) -> datetime:
     return moment.astimezone(OSLO)
 
 
+def as_oslo(moment: datetime) -> datetime:
+    """Return `moment` as Europe/Oslo. A naive value is read as Oslo local time."""
+    return _as_oslo(moment)
+
+
 def _sol_to_lamports(amount: float) -> int:
     return round(amount * 1_000_000_000)
 
