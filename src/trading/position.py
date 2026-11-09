@@ -16,6 +16,7 @@ class ExitReason(Enum):
     STOP_LOSS = "stop_loss"
     MAX_HOLD_TIME = "max_hold_time"
     MANUAL = "manual"
+    COPY_EXIT = "copy_exit"
 
 
 @dataclass

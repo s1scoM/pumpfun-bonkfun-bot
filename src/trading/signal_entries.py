@@ -58,6 +58,9 @@ logger = get_logger(__name__)
 PUMP = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMPSWAP = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 WSOL = "So11111111111111111111111111111111111111112"
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+ATA_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}
 
 
@@ -141,6 +144,19 @@ class CopytradeConfig:
     flood_limit_per_10s: int = 60      # unsubscribe a wallet spammed beyond this             # getTransaction tries (tx lands before it is served)
     skip_traded_today: bool = True
     traded_file: str = "positions/copytrade-traded.json"
+    # Exit side (read by the position manager, see SourceSellWatcher).
+    # exit_on_source_sell: sell our whole position when the copied wallet sells
+    # that mint (any sell, partial or full), logged as exit reason copy_exit.
+    # Only positions that remember their source wallet use it; the others keep
+    # the normal take profit.
+    exit_on_source_sell: bool = False
+    disable_take_profit: bool = False  # no fixed TP on a position that has a source
+    disable_trailing_stop: bool = False  # no trailing stop on such a position
+    max_hold_time_s: int | None = None  # override trade.max_hold_time for them
+    exit_poll_seconds: float = 2.5     # source wallet poll interval
+    exit_sell_attempts: int | None = None  # override trade.max_exit_sell_attempts
+    exit_retry_backoff_s: float = 1.5  # first wait after a failed exit sell, doubling
+    exit_retry_backoff_max_s: float = 10.0
 
 
 def load_copytrade_config(raw: dict | None) -> CopytradeConfig:
@@ -386,7 +402,12 @@ class CopytradeScanner:
                 continue
             onchain = info.additional_data.get("onchain_price_sol")
             info.additional_data["entry"] = "copytrade"
-            info.additional_data["copytrade"] = base
+            # Saved with the position (token_info is stored whole): the exit
+            # watcher needs the full wallet and the signature of their buy.
+            info.additional_data["copytrade"] = {
+                **base, "source_wallet": wallet, "source_buy_sig": sig,
+                "source_buy_ts": swap["ts"],
+            }
             self._log("PICK", symbol=info.symbol, onchain_price=onchain,
                       chase_pct=round((onchain / swap["price_sol"] - 1) * 100, 1)
                       if swap["price_sol"] else None, **base)
@@ -414,6 +435,229 @@ class CopytradeScanner:
 
     def mark_traded(self, mint: str) -> None:
         self.traded.add(mint)
+
+
+# --------------------------------------------------------------------------- copy exit
+
+
+def parse_wallet_sell(wallet: str, mint: str, tx: dict | None) -> dict | None:
+    """The wallet's sale of `mint` in a jsonParsed transaction, or None.
+
+    A sale is a transaction the wallet signed and that landed, in which the
+    wallet's own balance of `mint` went down. Any venue counts (pump.fun,
+    PumpSwap, a router), partial or full.
+    """
+    if not tx or not tx.get("meta") or tx["meta"].get("err"):
+        return None
+    raw = tx["transaction"]["message"]["accountKeys"]
+    signers = {k["pubkey"] for k in raw if isinstance(k, dict) and k.get("signer")}
+    if wallet not in signers:
+        return None
+    delta = 0.0
+    for side, sign in (("preTokenBalances", -1), ("postTokenBalances", 1)):
+        for b in tx["meta"].get(side) or []:
+            if b.get("owner") == wallet and b.get("mint") == mint:
+                delta += sign * float(b["uiTokenAmount"].get("uiAmount") or 0)
+    if delta >= 0:
+        return None
+    keys = [k["pubkey"] if isinstance(k, dict) else k for k in raw]
+    sol = (tx["meta"]["postBalances"][keys.index(wallet)]
+           - tx["meta"]["preBalances"][keys.index(wallet)]) / 1e9
+    return {"tokens": -delta, "sol_delta": sol, "ts": tx.get("blockTime")}
+
+
+class SourceSellWatcher:
+    """Waits for a followed wallet to sell a mint it bought.
+
+    Two independent signals, either one ends the wait:
+
+    * balance: the wallet's token account for the mint, every round. Once the
+      wallet has been seen holding the mint, any drop (or the account
+      disappearing) is a sale. It needs no transaction fetch, which matters
+      because the public RPC cannot serve a good share of a busy wallet's
+      transactions.
+    * transactions: `getSignaturesForAddress(wallet, until=<their buy
+      signature>)` sees everything after their buy, including what landed
+      before our own buy; each new one is fetched and read with
+      `parse_wallet_sell`. A transaction that cannot be fetched is retried a
+      few rounds, then skipped, so it never blocks the ones behind it.
+
+    `wait()` returns the sale; `sold` is set once it is found.
+    """
+
+    MAX_FETCH_TRIES = 6
+
+    def __init__(self, rpc_endpoint: str, wallet: str, mint: str, *, since_sig: str | None,
+                 since_ts: float | None, poll_seconds: float = 2.5, label: str = "") -> None:
+        self.rpc_endpoint, self.wallet, self.mint = rpc_endpoint, wallet, mint
+        self.since_sig, self.since_ts = since_sig, since_ts
+        self.poll_seconds, self.label = poll_seconds, label or wallet[:8]
+        self.sale: dict | None = None
+        self._session: aiohttp.ClientSession | None = None
+        self._done: set[str] = set()
+        self._tries: dict[str, int] = {}
+        self._beat = time.monotonic()
+        self.rounds = 0
+        self.skipped = 0
+        self.peak_raw: int | None = None  # most of the mint the wallet was seen holding
+        self._newest: str | None = None
+        self._ata_keys: list[str] = []
+
+    @property
+    def sold(self) -> bool:
+        return self.sale is not None
+
+    async def _rpc(self, method: str, params: list) -> Any:
+        if self._session is None:
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        try:
+            async with self._session.post(
+                self.rpc_endpoint,
+                json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            ) as r:
+                if r.status == 429:
+                    logger.warning("COPY-EXIT rpc 429; backing off")
+                    await asyncio.sleep(3)
+                    return None
+                data = await r.json(content_type=None)
+                return None if "error" in data else data.get("result")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"COPY-EXIT rpc {method} failed: {e!s}")
+            return None
+
+    def _atas(self) -> list[str]:
+        """The wallet's associated token accounts for the mint (Token and Token-2022)."""
+        if not self._ata_keys:
+            from solders.pubkey import Pubkey
+
+            owner, mint = Pubkey.from_string(self.wallet), Pubkey.from_string(self.mint)
+            for program in (TOKEN_PROGRAM, TOKEN_2022_PROGRAM):
+                self._ata_keys.append(str(Pubkey.find_program_address(
+                    [bytes(owner), bytes(Pubkey.from_string(program)), bytes(mint)],
+                    Pubkey.from_string(ATA_PROGRAM))[0]))
+        return self._ata_keys
+
+    async def _balance_raw(self) -> int | None:
+        """The wallet's raw balance of the mint; None if unreadable.
+
+        Reads the two possible associated token accounts in one getMultipleAccounts
+        (the public RPC refuses getTokenAccountsByOwner). A missing account is 0.
+        """
+        res = await self._rpc(
+            "getMultipleAccounts",
+            [self._atas(), {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        )
+        if res is None:
+            return None
+        total = 0
+        for acc in res.get("value") or []:
+            if acc:
+                total += int(acc["data"]["parsed"]["info"]["tokenAmount"]["amount"])
+        return total
+
+    async def _check_balance(self) -> bool:
+        raw = await self._balance_raw()
+        if raw is None:
+            return False
+        if self.peak_raw is None:
+            if raw > 0:
+                self.peak_raw = raw
+            return False
+        if raw < self.peak_raw:
+            self.sale = {"tokens": (self.peak_raw - raw) / 1e6, "sol_delta": None,
+                         "ts": time.time(), "sig": None, "via": "balance"}
+            return True
+        self.peak_raw = raw
+        return False
+
+    async def _new_signatures(self) -> list[dict] | None:
+        """Signatures after the starting point, oldest first; None if unreadable."""
+        found: list[dict] = []
+        before = None
+        for _ in range(6):  # a spammed wallet can pile up more than one page
+            opts: dict = {"limit": 200, "commitment": "confirmed"}
+            if self.since_sig:
+                opts["until"] = self.since_sig
+            if before:
+                opts["before"] = before
+            page = await self._rpc("getSignaturesForAddress", [self.wallet, opts])
+            if page is None:
+                return None
+            found += page
+            if len(page) < 200:
+                break
+            before = page[-1]["signature"]
+        if not self.since_sig and self.since_ts is not None:
+            found = [s for s in found if (s.get("blockTime") or 0) >= self.since_ts - 5]
+        self._newest = found[0]["signature"] if found else None
+        return [s for s in reversed(found) if not s.get("err") and s["signature"] not in self._done]
+
+    async def _check(self, sig: str) -> bool | None:
+        """True: a sale of the mint. False: not one. None: could not be fetched."""
+        tx = await self._rpc(
+            "getTransaction",
+            [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+                   "commitment": "confirmed"}],
+        )
+        if not tx:
+            return None
+        sale = parse_wallet_sell(self.wallet, self.mint, tx)
+        if sale:
+            self.sale = {**sale, "sig": sig, "via": "transaction"}
+            return True
+        return False
+
+    async def _round(self) -> bool:
+        if await self._check_balance():
+            return True
+        sigs = await self._new_signatures()
+        complete = sigs is not None
+        for s in sigs or []:
+            sig = s["signature"]
+            verdict = await self._check(sig)
+            if verdict is None:
+                self._tries[sig] = self._tries.get(sig, 0) + 1
+                if self._tries[sig] >= self.MAX_FETCH_TRIES:
+                    self._done.add(sig)  # the node never serves it: do not hold up the rest
+                    self.skipped += 1
+                else:
+                    complete = False
+                continue
+            self._done.add(sig)
+            if verdict:
+                return True
+        if complete and self._newest:
+            self.since_sig = self._newest  # the next round starts after what was read
+        return False
+
+    async def wait(self) -> dict:
+        try:
+            while True:
+                found = await self._round()
+                self.rounds += 1
+                if found:
+                    sale = self.sale
+                    logger.info(
+                        f"COPY-EXIT source {self.label} sold {self.mint} (via {sale['via']}): "
+                        f"{sale['tokens']:.2f} tokens"
+                        + (f", {sale['sol_delta']:+.4f} SOL" if sale["sol_delta"] is not None else "")
+                        + (f" sig={sale['sig'][:16]}" if sale["sig"] else "")
+                    )
+                    return sale
+                if time.monotonic() - self._beat >= 60:
+                    self._beat = time.monotonic()
+                    logger.info(
+                        f"COPY-EXIT watching {self.label} for a sell of {self.mint}: "
+                        f"{self.rounds} polls, {len(self._done)} txs read, {self.skipped} unfetchable, "
+                        f"source holds {self.peak_raw}"
+                    )
+                await asyncio.sleep(self.poll_seconds)
+        finally:
+            if self._session is not None:
+                await self._session.close()
+                self._session = None
 
 
 # --------------------------------------------------------------------------- xsignal

@@ -23,6 +23,17 @@ filters:
     detect: "poll"               # getSignaturesForAddress per wallet (ws drops on public nodes)
     poll_seconds: 3
     traded_file: "positions/copytrade-traded.json"
+    # Exit side: sell when the copied wallet sells (SourceSellWatcher, same publicnode
+    # rpc_endpoint). Needs the source wallet saved with the position (done at entry).
+    exit_on_source_sell: true    # any sale of that mint by them, partial or full -> sell all, reason copy_exit
+    disable_take_profit: true    # no fixed TP on such a position (trade.take_profit_percentage ignored)
+    disable_trailing_stop: true  # their sale is the exit; trailing would cut winners they still hold
+    max_hold_time_s: 3600        # backup if we miss their sale (overrides trade.max_hold_time)
+    exit_poll_seconds: 2.5       # source wallet poll
+    exit_sell_attempts: 8        # exit sell tries (overrides trade.max_exit_sell_attempts upward)
+    exit_retry_backoff_s: 1.5    # wait after a failed exit sell, doubling ...
+    exit_retry_backoff_max_s: 10 # ... to this cap
+    # trade.stop_loss_percentage (-50%) stays as the other backup.
     # Kept: on-chain closed PnL positive in /workspace/copytrade-research verify (Nov 9).
     wallets:
       - {address: "FqamE7xrahg7FEWoByrx1o8SeyHt44rpmE6ZQfT7zrve", label: "kolscan:EustazZ"}
