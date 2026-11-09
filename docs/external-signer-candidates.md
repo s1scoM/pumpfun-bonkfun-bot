@@ -43,3 +43,26 @@ copying it into this MIT bot.
 `bots/phantom-executor.yaml` remains `enabled: false`, `stop: true` and
 `submit: false`. A Phantom `perps_*` HTTP 403, and a separate mobile wallet,
 are outside these repositories.
+
+## Unverified wallet advice
+
+Advice to import a seed, create a burner wallet, unlock a browser extension for
+eight hours, or turn on auto-approve for Jupiter, Drift or Axiom was not
+followed and is not implemented here. No reviewed repository documents a scoped
+Solana session key for the Phantom MCP embedded wallet.
+
+Phantom's own docs separate the two wallets. An embedded wallet is created with
+Google or Apple and is managed by Phantom. An extension wallet is a
+self-custody wallet with its own recovery phrase. Auto-confirm exists only for
+the injected extension provider; the docs say calling it on an embedded
+provider throws. The embedded path documents `signAndSendTransaction`, which
+signs and broadcasts together. It does not document `signTransaction` alone.
+MCP `solana_send` still simulates when `confirmed` is omitted and signs and
+broadcasts only when `confirmed` is true.
+
+The agent address `8rRjKEhJYoYJmG3AVz64xq1cj9LUpqr77j9My5T26BDj` still held
+223224000 lamports on the last public `getBalance` read. That read does not
+support a claim that social login creates a new empty address every session.
+A mobile wallet is a different account. Drift is a perpetual venue. A session
+delegation to Drift, Jupiter or Axiom would be a new signature we do not
+create, and it would not answer a Phantom MCP `perps_*` 403.

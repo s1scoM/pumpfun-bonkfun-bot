@@ -67,6 +67,14 @@ def main() -> None:
         _EXECUTOR.name,
     ):
         problems.append("executor")
+    if not _check(
+        "session-key advice is recorded as unsupported",
+        "Auto-confirm exists only for the injected extension" in " ".join(doc.split())
+        and "session key" in doc
+        and "223224000" in doc,
+        "unverified wallet advice",
+    ):
+        problems.append("advice")
     if problems:
         print(f"FAILED {len(problems)} check(s)")
         sys.exit(1)
