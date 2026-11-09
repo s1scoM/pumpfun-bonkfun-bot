@@ -1,0 +1,29 @@
+# Safe Phantom external-executor config.
+# pump_bot skips this file because enabled is false. It has no private key.
+# submit cannot be turned on by this file: the loader rejects submit: true.
+# stop blocks buy, sell and close. The self-transfer generator is a separate
+# command and spends 0 lamports to the fee payer.
+
+name: "phantom-executor"
+enabled: false
+submit: false
+live: false
+stop: true
+gmgn_read: false
+
+fee_payer: "8rRjKEhJYoYJmG3AVz64xq1cj9LUpqr77j9My5T26BDj"
+
+capital_cap_nok: 200
+reserve_sol: 0.008224
+max_spend_sol: 0.215
+max_quote_sol: 0.001
+buy_slippage: 0.05
+sell_slippage: 0.05
+priority_fee_microlamports: 0
+max_positions: 1
+max_retries: 1
+blockhash_max_age_seconds: 60
+
+# Required before live: true, which still cannot submit. Null fails closed.
+deadline_oslo: null
+fx_nok_per_sol: null
