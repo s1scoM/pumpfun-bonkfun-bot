@@ -80,6 +80,7 @@ another shape stays in that verifier. Each verifier still runs on its own.
 | `verify_paper_readiness.py` | an offline paper review with network and signing disabled: a 32-byte public key is not a `Wallet`, `build_and_send_transaction` still signs with a `Keypair`, `bots/paper-example.yaml` is disabled and cannot load, the shipped geyser bot stays `enabled: true`, and the advance decision on the labeled example is no |
 | `verify_unsigned_phantom_envelope.py` | a public key and a dead blockhash produce a standard-base64 v0 envelope with an empty signature and `confirmed` false; the live send path still signs with a keypair |
 | `verify_phantom_executor.py` | fixture buy, sell and close are unsigned pump.fun or Token-2022 instructions; NOK cap, reserve, stop, duplicate simulation and sendTransaction are refused; the sniper config is unchanged |
+| `verify_external_signer_candidates.py` | the reviewed sol-trade-sdk, eliza and OpenAlice commits stay out of pyproject, and the Phantom executor config stays stopped |
 
 Two mainnet simulations, also no funds moved:
 
