@@ -1,0 +1,53 @@
+# EXAMPLE_FIXTURE_NOT_LIVE
+# Paper review only. pump_bot skips this file because enabled is false.
+# It has no private key, no keystore and no real RPC host. Do not point it
+# at a funded wallet.
+
+name: "paper-example"
+enabled: false
+rpc_endpoint: "https://example.invalid/paper-rpc"
+wss_endpoint: "wss://example.invalid/paper-ws"
+platform: "pump_fun"
+
+trade:
+  buy_amount: 0.0001
+  buy_slippage: 0.3
+  sell_slippage: 0.3
+  exit_strategy: "time_based"
+  max_hold_time: 5
+  extreme_fast_mode: true
+  extreme_fast_token_amount: 20
+  max_open_positions: 1
+
+priority_fees:
+  enable_dynamic: false
+  enable_fixed: true
+  fixed_amount: 1000000
+  extra_percentage: 0.0
+  hard_cap: 1000000
+
+filters:
+  listener_type: "logs"
+  max_token_age: 0.001
+  marry_mode: false
+  yolo_mode: false
+
+retries:
+  max_attempts: 1
+  wait_after_creation: 15
+  wait_after_buy: 5
+  wait_before_new_token: 15
+
+cleanup:
+  mode: "after_sell"
+  force_close_with_burn: false
+  with_priority_fee: true
+
+node:
+  max_rps: 1
+
+paper:
+  label: EXAMPLE_FIXTURE_NOT_LIVE
+  network: disabled
+  signing: disabled
+  signer: phantom_external
