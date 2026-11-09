@@ -181,3 +181,7 @@ trades/trades.log
 phantom-requests/
 # Mac OS X
 .DS_Store
+# Local Momo dry-run artifacts (never commit secrets)
+bots/momo-*.yaml
+.env.momo
+momo-bot.enc

@@ -43,7 +43,10 @@ from trading.migration import MigrationResolver
 from trading.platform_aware import PlatformAwareBuyer, PlatformAwareSeller
 from trading.position_manager import PositionManager
 from trading.position_store import PositionStore
-from trading.settings import TraderSettings, entry_error
+from trading.entry_filters import EntryFilterEngine, load_entry_filter_config
+from trading.risk_guard import RiskGuard, RiskLimits
+from trading.momentum import MomentumScanner, load_momentum_config
+from trading.settings import ENTRY_MODES, TraderSettings, entry_error
 from utils.logger import get_logger
 
 # Try to use uvloop on Unix or winloop on Windows for better performance
@@ -141,11 +144,32 @@ class UniversalTrader:
         )
         if error:
             raise ValueError(error)
+        if settings.entry_mode not in ENTRY_MODES:
+            raise ValueError(
+                f"trade.entry_mode must be one of {list(ENTRY_MODES)}, "
+                f"not {settings.entry_mode!r}"
+            )
+        if settings.entry_mode == "momentum" and settings.entry != "new_launch":
+            raise ValueError("trade.entry_mode: momentum needs trade.entry: new_launch")
         self.settings = settings
+        self.entry_mode = settings.entry_mode
         self.entry = settings.entry
+        self.dry_run = bool(settings.dry_run)
+        self.risk_guard = RiskGuard(
+            RiskLimits(
+                min_sol_reserve=settings.min_sol_reserve,
+                daily_max_spend_sol=settings.daily_max_spend_sol,
+                max_losing_trades=settings.max_losing_trades,
+                fee_rent_buffer_sol=settings.fee_rent_buffer_sol,
+                state_file=settings.risk_state_file,
+            )
+        )
         # Core components
         self.solana_client = SolanaClient(
             settings.rpc_endpoint, max_rps=settings.max_rps
+        )
+        self.entry_filters = EntryFilterEngine(
+            self.solana_client, load_entry_filter_config(settings.entry_filters)
         )
         self.wallet = Wallet(settings.private_key)
         self.priority_fee_manager = PriorityFeeManager(
@@ -243,6 +267,16 @@ class UniversalTrader:
             ),
         )
 
+        self.momentum = (
+            MomentumScanner(
+                self.solana_client,
+                load_momentum_config(settings.momentum),
+                self.platform,
+            )
+            if self.entry_mode == "momentum"
+            else None
+        )
+
         self.positions = PositionManager(
             settings,
             seller=self.seller,
@@ -255,6 +289,7 @@ class UniversalTrader:
                 if settings.positions_file
                 else None
             ),
+            risk_guard=self.risk_guard,
         )
         # A buy sent is on disk before it confirms, so a shutdown or crash
         # while it is in flight does not lose the coin.
@@ -300,7 +335,7 @@ class UniversalTrader:
         """Start the trading bot and listen for new tokens."""
         intake, positions = self.intake, self.positions
         logger.info(f"Starting Universal Trader for {self.platform.value}")
-        logger.info(f"Entry: {self.entry}")
+        logger.info(f"Entry: {self.entry} (entry_mode: {self.entry_mode})")
         logger.info(
             f"Match filter: {intake.match_string if intake.match_string else 'None'}"
         )
@@ -309,6 +344,13 @@ class UniversalTrader:
         )
         logger.info(f"Marry mode: {positions.marry_mode}")
         logger.info(f"YOLO mode: {self.yolo_mode}")
+        logger.info(f"DRY_RUN mode: {self.dry_run}")
+        logger.info(
+            "Risk limits: min_reserve=%s daily_max_spend=%s max_losing_trades=%s",
+            self.risk_guard.limits.min_sol_reserve,
+            self.risk_guard.limits.daily_max_spend_sol,
+            self.risk_guard.limits.max_losing_trades,
+        )
         logger.info(f"Exit strategy: {positions.exit_strategy}")
         logger.info(f"Max open positions: {positions.max_open_positions}")
 
@@ -353,11 +395,18 @@ class UniversalTrader:
                 logger.info(
                     "Running in single token mode - will process one token and exit"
                 )
-                token_info = await (
-                    intake.wait_for_migrated_token()
-                    if self.entry == "migration"
-                    else intake.wait_for_token()
-                )
+                if self.momentum is not None:
+                    if self.platform != Platform.PUMP_FUN:
+                        raise ValueError("entry_mode: momentum supports pump_fun only")
+                    token_info = await self.momentum.wait_for_token(
+                        intake.token_wait_timeout
+                    )
+                else:
+                    token_info = await (
+                        intake.wait_for_migrated_token()
+                        if self.entry == "migration"
+                        else intake.wait_for_token()
+                    )
                 if token_info:
                     await self._handle_token(token_info)
                     await positions.wait_all()
@@ -368,6 +417,16 @@ class UniversalTrader:
                     logger.info(
                         f"No suitable token found within timeout period ({intake.token_wait_timeout}s). Exiting..."
                     )
+            elif self.momentum is not None:
+                # Continuous momentum mode: one pick at a time, next after exit.
+                logger.info("Running momentum scanner in continuous mode")
+                while True:
+                    token_info = await self.momentum.wait_for_token(
+                        intake.token_wait_timeout
+                    )
+                    if token_info:
+                        await self._handle_token(token_info)
+                    await asyncio.sleep(self.wait_time_before_new_token)
             else:
                 # Continuous mode: process tokens until interrupted
                 logger.info(
@@ -514,12 +573,59 @@ class UniversalTrader:
 
             # The buyer names the venue once it has read whether the curve
             # has graduated.
+            # YAML entry filters (observe window, authorities, flow, holders)
+            if self.entry_filters is not None:
+                filt_reason = await self.entry_filters.evaluate(token_info)
+                if filt_reason:
+                    logger.info(f"ENTRY FILTER skip {token_info.symbol}: {filt_reason}")
+                    return
+
+            buy_amount = self.quote_amounts[token_quote_mint]
             logger.info(
-                f"Buying {self.quote_amounts[token_quote_mint]:.6f} of quote "
+                f"Buying {buy_amount:.6f} of quote "
                 f"{token_quote_mint} worth of {token_info.symbol} "
                 f"({token_info.mint})..."
             )
-            buy_result: TradeResult = await self.buyer.execute(token_info)
+
+            # SOL balance for reserve kill-switch (native lamports on the fee payer).
+            try:
+                account = await self.solana_client.get_account_info(
+                    self.wallet.pubkey, commitment="processed"
+                )
+                balance_sol = account.lamports / 1_000_000_000
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Could not read SOL balance for risk guard: {exc}")
+                balance_sol = 0.0
+
+            skip = self.risk_guard.allow_buy(
+                balance_sol=balance_sol, buy_amount_sol=float(buy_amount)
+            )
+            if skip:
+                logger.warning(f"RISK SKIP {token_info.symbol}: {skip}")
+                buy_result = TradeResult(
+                    success=False,
+                    platform=token_info.platform,
+                    error_message=f"risk_skip: {skip}",
+                )
+            elif self.dry_run:
+                logger.info(
+                    f"DRY_RUN would-be buy: symbol={token_info.symbol} "
+                    f"mint={token_info.mint} buy_amount={buy_amount} "
+                    f"balance_sol={balance_sol:.6f} "
+                    f"reserve={self.risk_guard.limits.min_sol_reserve} "
+                    f"(no transaction sent)"
+                )
+                buy_result = TradeResult(
+                    success=False,
+                    platform=token_info.platform,
+                    error_message="DRY_RUN: buy not sent",
+                )
+            else:
+                self.risk_guard.record_buy_attempt(float(buy_amount))
+                if self.momentum is not None:
+                    # Once per coin per day, also when the buy fails.
+                    self.momentum.mark_traded(str(token_info.mint))
+                buy_result = await self.buyer.execute(token_info)
 
             if buy_result.success:
                 await self._handle_successful_buy(token_info, buy_result)

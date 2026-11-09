@@ -136,6 +136,7 @@ class PositionManager:
         priority_fee_manager: PriorityFeeManager,
         platform_implementations: PlatformImplementations,
         store: PositionStore | None = None,
+        risk_guard=None,
     ) -> None:
         """Set up the manager; without a `store` nothing is written to disk."""
         self.seller = seller
@@ -150,6 +151,7 @@ class PositionManager:
         self.exit_strategy = settings.exit_strategy.lower()
         self.take_profit_percentage = settings.take_profit_percentage
         self.stop_loss_percentage = settings.stop_loss_percentage
+        self.trailing_stop_percentage = settings.trailing_stop_percentage
         self.max_hold_time = settings.max_hold_time
         # The attempt cap is clamped: below 1 would mean "never try to sell".
         self.price_check_interval, self.max_exit_sell_attempts = (
@@ -171,6 +173,7 @@ class PositionManager:
         # One task per position still running its exit strategy.
         self._open: set[asyncio.Task] = set()
         self.store = store
+        self.risk_guard = risk_guard
 
     @property
     def monitors(self) -> bool:
@@ -938,6 +941,7 @@ class PositionManager:
             quantity_raw=buy_result.amount_raw,
             take_profit_percentage=self.take_profit_percentage,
             stop_loss_percentage=self.stop_loss_percentage,
+            trailing_stop_percentage=self.trailing_stop_percentage,
             max_hold_time=self.max_hold_time,
         )
         if entry_time is not None:
@@ -957,6 +961,11 @@ class PositionManager:
             logger.info(
                 f"Stop loss target: {format_price(position.stop_loss_price)} "
                 f"{quote_label}"
+            )
+        if position.trailing_stop_price:
+            logger.info(
+                f"Trailing stop armed: {format_price(position.trailing_stop_price)} "
+                f"{quote_label} ({(self.trailing_stop_percentage or 0)*100:.0f}% trail)"
             )
 
         # Monitor position until exit condition is met
@@ -1633,6 +1642,8 @@ class PositionManager:
                 label = "Final PnL" if last else "PnL on the part sold"
                 total = realised.suffix(quote_label) if last else ""
                 logger.info(pnl_text(label, pnl, quote_label) + total)
+                if last and self.risk_guard is not None and pnl.pnl < 0:
+                    self.risk_guard.record_loss()
             elif last:
                 logger.info(
                     f"Final PnL: unknown, this sale could not be priced"
