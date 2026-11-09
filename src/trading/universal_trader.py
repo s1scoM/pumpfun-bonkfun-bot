@@ -291,6 +291,8 @@ class UniversalTrader:
                 self.solana_client, load_xsignal_config(settings.xsignal), self.platform
             )
 
+        self.adopt_orphans = bool(getattr(settings, "adopt_orphans", False))
+
         self.positions = PositionManager(
             settings,
             seller=self.seller,
@@ -396,6 +398,8 @@ class UniversalTrader:
         try:
             for token_info in await positions.resume():
                 self._track_traded(token_info)
+            if self.adopt_orphans:
+                await self._adopt_orphans()
             # Every coin left in the file may still be held, monitored or not:
             # the intake must not buy it again, e.g. when it migrates under
             # `entry: migration`, or the new buy would replace its record.
@@ -463,6 +467,24 @@ class UniversalTrader:
             await positions.stop()
             await self._cleanup_without_interruption()
             logger.info("Universal Trader has shut down")
+
+    async def _adopt_orphans(self) -> None:
+        """Take over coins held without a position record (see trading.orphans)."""
+        from trading.orphans import find_orphans
+
+        try:
+            orphans = await find_orphans(
+                self.solana_client, self.wallet.pubkey, self.platform,
+                self.positions.stored_mints(),
+            )
+        except Exception:  # noqa: BLE001 - never stop the bot over the scan
+            logger.exception("ORPHAN scan failed; no coin adopted this start")
+            return
+        for orphan in orphans:
+            self._track_traded(orphan.token_info)
+            self.positions.adopt(orphan)
+            if self.momentum is not None:
+                self.momentum.mark_traded(str(orphan.token_info.mint))
 
     async def _cleanup_without_interruption(self) -> None:
         """Run cleanup to completion even though shutdown arrives as a cancellation.

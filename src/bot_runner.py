@@ -279,6 +279,7 @@ def build_trader_settings(
         trailing_stop_percentage=cfg["trade"].get("trailing_stop_percentage"),
         entry_filters=(cfg.get("filters") or {}).get("entry"),
         entry_mode=str(cfg["trade"].get("entry_mode", "sniper")),
+        adopt_orphans=bool(cfg["trade"].get("adopt_orphans", False)),
         momentum=(cfg.get("filters") or {}).get("momentum"),
         copytrade=(cfg.get("filters") or {}).get("copytrade"),
         xsignal=(cfg.get("filters") or {}).get("xsignal"),

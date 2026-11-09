@@ -127,6 +127,8 @@ class TraderSettings:
     # "sniper" takes coins as they launch (listener); "momentum" polls public
     # market data for pump.fun coins already moving up (trading.momentum).
     entry_mode: str = "sniper"
+    # At start, adopt pump.fun coins in the wallet that no position record covers.
+    adopt_orphans: bool = False
     momentum: dict | None = None
     # filters.copytrade / filters.xsignal (trading.signal_entries).
     copytrade: dict | None = None

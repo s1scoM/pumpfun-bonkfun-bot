@@ -696,6 +696,20 @@ class PositionManager:
                 f"has expired is settled by the wallet's balance"
             )
 
+    def adopt(self, orphan) -> None:
+        """Hold a coin found in the wallet without a record, as if resumed.
+
+        The record is written first, so a restart picks it up like any other.
+        """
+        token_info, buy = orphan.token_info, orphan.buy_result
+        if self.store is not None:
+            self.store.add(token_info, buy, orphan.entry_time, self.wallet.pubkey)
+        logger.warning(
+            f"Adopting {token_info.symbol} ({token_info.mint}): {buy.amount} tokens "
+            f"held without a position record"
+        )
+        self.open(token_info, buy, entry_time=orphan.entry_time)
+
     def stored_mints(self) -> set[str]:
         """Every mint in the store, resumed or not; empty without a store."""
         return set() if self.store is None else self.store.mints()
